@@ -106,6 +106,10 @@ peer2peer_prj/
 │   └── requirements.txt     # Dependencies
 └── README.md
 ```
+<img width="1901" height="874" alt="image" src="https://github.com/user-attachments/assets/7f3ccefb-5228-42ee-8a9c-c8a137988fed" />
+<img width="1901" height="873" alt="image" src="https://github.com/user-attachments/assets/b5b7228f-eeaf-4761-862e-e433186effbc" />
+
+
 
 ## 🔌 API Endpoints
 
