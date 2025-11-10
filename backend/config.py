@@ -8,9 +8,13 @@ from pathlib import Path
 BASE_DIR = Path(__file__).parent.absolute()
 
 # Network settings
-HOST = '0.0.0.0'  # Listen on all interfaces
-PORT = 5000
-MAX_PEERS = 50
+HOST = '0.0.0.0'
+PORT = 5001
+TRACKER_URL = f'http://{HOST}:{PORT}'
+UPLOAD_FOLDER = 'uploads'
+TORRENT_FOLDER = 'torrents'
+MAX_CONTENT_LENGTH = 16 * 1024 * 1024  # 16MB
+SECRET_KEY = 'vm1-secret-key-123'
 
 # File storage
 UPLOAD_FOLDER = os.path.join(BASE_DIR, 'uploads')

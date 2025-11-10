@@ -1,104 +1,429 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Peer2Peer Torrent Client</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <title>P2P Tracker Client - REAL SOCKET.IO</title>
+    <script src="/socket.io.js"></script>
     <style>
-        body {
-            background-color: #f8f9fa;
-            padding: 20px;
-        }
-        .container {
-            max-width: 1000px;
-            margin: 0 auto;
-        }
-        .card {
-            margin-bottom: 20px;
-            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
-        }
-        .status {
-            font-family: monospace;
-            white-space: pre-wrap;
-            min-height: 100px;
-            max-height: 400px;
-            overflow-y: auto;
-        }
-        .peer-badge {
-            margin-right: 5px;
-            margin-bottom: 5px;
-        }
-        .progress {
-            height: 25px;
-            margin: 10px 0;
-        }
+        :root { --brand:#007cba; --brand-600:#005a87; --ok:#28a745; --warn:#ffc107; --err:#dc3545; --info:#17a2b8; --bg:#f5f7fb; --panel:#ffffff; --muted:#6c757d; }
+        * { box-sizing: border-box; }
+        body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 0; background: linear-gradient(180deg, #eef3f9, #f8fafc); color:#1f2937; }
+        .header { background: linear-gradient(135deg, var(--brand), #00a5e0); color:white; padding: 20px; box-shadow: 0 8px 24px rgba(0,0,0,0.08); position: sticky; top:0; z-index:2; }
+        .header h1 { margin:0; font-size: 24px; letter-spacing: 0.3px; }
+        .container { max-width: 1200px; margin: 24px auto; background: var(--panel); padding: 24px; border-radius: 16px; box-shadow: 0 8px 30px rgba(31,41,55,0.08); }
+        .badge { display:inline-block; padding: 4px 10px; border-radius: 999px; font-size: 12px; background: rgba(255,255,255,0.25); border:1px solid rgba(255,255,255,0.4); margin-left:8px; }
+        .controls { display: flex; flex-wrap: wrap; gap: 10px; margin: 20px 0; padding: 14px; background: #eef2f7; border-radius: 12px; border:1px solid #e5e7eb; }
+        button { appearance: none; margin: 2px; padding: 12px 16px; background: var(--brand); color: white; border: none; border-radius: 10px; cursor: pointer; font-size: 14px; font-weight: 600; transition: all 0.2s ease; box-shadow: 0 4px 12px rgba(0,124,186,0.25); }
+        button:hover { background: var(--brand-600); transform: translateY(-1px); box-shadow: 0 6px 16px rgba(0,124,186,0.32); }
+        button:active { transform: translateY(0); }
+        button:disabled { background: #94a3b8; cursor: not-allowed; box-shadow:none; }
+        .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin: 16px 0; }
+        .stat-box { padding: 18px; border-radius: 12px; background: radial-gradient(120% 120% at 0% 0%, #0ea5e980 0%, #0ea5e91a 100%); color: #0b3757; border:1px solid #dbeafe; box-shadow: inset 0 1px 0 rgba(255,255,255,0.5); text-align:center; }
+        .stat-box h3 { margin: 0 0 8px 0; color:#0b3757; font-size:14px; }
+        .stat-box div { font-size: 28px; font-weight: 800; color:#0b3757; }
+        #status { padding: 12px; margin: 10px 0; font-weight: 700; border-radius: 10px; text-align: center; font-size: 14px; border:1px solid #e5e7eb; }
+        .connected { background: #e8fff1; color: #065f46; border-color: #a7f3d0; }
+        .disconnected { background: #fff1f2; color: #9f1239; border-color: #fecdd3; }
+        .socket-status { padding: 14px; margin: 14px 0; border-radius: 10px; font-weight: 700; text-align: center; font-size: 14px; border:1px solid #e5e7eb; }
+        .socket-good { background: #e8fff1; color: #065f46; border-color: #a7f3d0; }
+        .socket-bad { background: #fff1f2; color: #9f1239; border-color: #fecdd3; }
+        .upload-section { margin: 24px 0; padding: 18px; border: 2px dashed #cbd5e1; border-radius: 12px; background: #f8fafc; }
+        .peer-list, .torrent-list { max-height: 420px; overflow-y: auto; border: 1px solid #e5e7eb; padding: 12px; margin: 12px 0; border-radius: 12px; background: #fbfdff; }
+        .cards { display: grid; grid-template-columns: 1fr; gap: 12px; }
+        @media (min-width: 700px){ .cards { grid-template-columns: 1fr 1fr; } }
+        .card { padding: 12px; background: white; border:1px solid #e5e7eb; border-radius: 12px; box-shadow: 0 4px 12px rgba(2,6,23,0.06); transition: transform 0.15s ease; }
+        .card:hover { transform: translateY(-2px); }
+        .log-container { max-height: 360px; overflow-y: auto; border: 1px solid #e5e7eb; padding: 12px; border-radius: 12px; background: #fbfdff; }
+        .log { padding: 10px 12px; margin: 8px 0; border-radius: 10px; border-left: 4px solid var(--brand); background: #eef6ff; color:#0b3757; box-shadow: inset 0 1px 0 rgba(255,255,255,0.6); }
+        .success { border-left-color: var(--ok); background: #ecfdf5; color:#065f46; }
+        .error { border-left-color: var(--err); background: #fef2f2; color:#991b1b; }
+        .info { border-left-color: var(--info); background: #eff6ff; color:#1e3a8a; }
+        .warning { border-left-color: var(--warn); background: #fffbeb; color:#92400e; }
+        ul { list-style: none; padding: 0; margin:0; }
+        li { padding: 10px; margin: 6px 0; background: white; border-radius: 10px; border:1px solid #e5e7eb; box-shadow: 0 2px 6px rgba(2,6,23,0.04); }
+        input[type="file"] { padding: 12px; margin: 10px 0; border: 2px dashed var(--brand); background: #f0f9ff; border-radius: 10px; width: 100%; }
+        .toast-container { position: fixed; top: 20px; right: 20px; display: flex; flex-direction: column; gap: 10px; z-index: 50; }
+        .toast { padding: 12px 14px; border-radius: 12px; color: white; box-shadow: 0 12px 24px rgba(0,0,0,0.18); min-width: 260px; display: flex; align-items: center; gap: 10px; font-weight: 600; }
+        .toast.success { background: linear-gradient(135deg, #16a34a, #22c55e); }
+        .toast.error { background: linear-gradient(135deg, #b91c1c, #ef4444); }
+        .toast.info { background: linear-gradient(135deg, #0284c7, #38bdf8); }
+        .toast.warning { background: linear-gradient(135deg, #b45309, #f59e0b); }
     </style>
 </head>
 <body>
+    <div class="header">
+        <div style="max-width:1200px; margin:0 auto; display:flex; align-items:center; justify-content:space-between;">
+            <h1>🎯 P2P Tracker Client <span class="badge">REAL SOCKET.IO</span></h1>
+            <div id="socket-status" class="socket-status" style="margin:0; min-width:260px;">🔄 Checking Socket.IO...</div>
+        </div>
+    </div>
+
     <div class="container">
-        <div class="text-center mb-4">
-            <h1 class="display-4">Peer2Peer Torrent Client</h1>
-            <p class="lead">Decentralized file sharing with BitTorrent protocol</p>
+
+        <div class="stats">
+            <div class="stat-box">
+                <h3>Connection Status</h3>
+                <div id="status">Disconnected</div>
+            </div>
+            <div class="stat-box">
+                <h3>Connected Peers</h3>
+                <div id="peerCount">0</div>
+            </div>
+            <div class="stat-box">
+                <h3>Available Torrents</h3>
+                <div id="torrentCount">0</div>
+            </div>
         </div>
 
-        <div class="row">
-            <div class="col-md-6">
-                <div class="card">
-                    <div class="card-header bg-primary text-white">
-                        <h5 class="mb-0">Upload Torrent</h5>
-                    </div>
-                    <div class="card-body">
-                        <div class="mb-3">
-                            <label for="torrent-file" class="form-label">Select .torrent file</label>
-                            <input class="form-control" type="file" id="torrent-file" accept=".torrent">
-                        </div>
-                        <button id="upload-btn" class="btn btn-primary w-100">
-                            <span id="upload-spinner" class="spinner-border spinner-border-sm d-none" role="status" aria-hidden="true"></span>
-                            Start Download
-                        </button>
-                    </div>
-                </div>
+        <div class="toast-container" id="toastContainer"></div>
 
-                <div class="card mt-4">
-                    <div class="card-header bg-info text-white">
-                        <h5 class="mb-0">Connected Peers</h5>
-                    </div>
-                    <div class="card-body" id="peers-container">
-                        <p class="text-muted" id="no-peers">No peers connected yet</p>
-                        <div id="peers-list"></div>
-                    </div>
-                </div>
+        <div class="controls">
+            <button onclick="connectToTracker()" id="connectBtn">Connect to Tracker</button>
+            <button onclick="registerAsPeer()" id="registerBtn" disabled>Register as Peer</button>
+            <button onclick="getPeers()" id="peersBtn" disabled>Get Peers</button>
+            <button onclick="getTorrents()" id="torrentsBtn" disabled>Get Torrents</button>
+            <button onclick="testConnection()" id="testBtn" disabled>Test Connection</button>
+            <button onclick="clearLogs()" id="clearBtn">Clear Logs</button>
+            <button onclick="debugConnection()" id="debugBtn">Debug Info</button>
+        </div>
+
+        <div class="upload-section">
+            <h3>📤 Upload Torrent File</h3>
+            <input type="file" id="torrentFile" accept=".torrent">
+            <button onclick="uploadTorrent()" id="uploadBtn" disabled>Upload Torrent</button>
+            <div id="uploadStatus"></div>
+        </div>
+
+        <h3>Activity Log</h3>
+        <div id="logs" class="log-container"></div>
+
+        <div class="cards">
+            <div class="card">
+                <h3>👥 Connected Peers</h3>
+                <div id="peers" class="peer-list">No peers connected</div>
             </div>
-
-            <div class="col-md-6">
-                <div class="card h-100">
-                    <div class="card-header bg-secondary text-white d-flex justify-content-between align-items-center">
-                        <h5 class="mb-0">Download Status</h5>
-                        <div>
-                            <span id="download-speed" class="badge bg-success">0 KB/s</span>
-                            <span id="upload-speed" class="badge bg-primary ms-1">0 KB/s</span>
-                        </div>
-                    </div>
-                    <div class="card-body">
-                        <div class="mb-3">
-                            <div class="d-flex justify-content-between mb-1">
-                                <span>Download Progress</span>
-                                <span id="progress-text">0%</span>
-                            </div>
-                            <div class="progress">
-                                <div id="progress-bar" class="progress-bar progress-bar-striped progress-bar-animated" 
-                                     role="progressbar" style="width: 0%"></div>
-                            </div>
-                        </div>
-                        <div class="status card p-3 bg-light" id="status">
-                            Ready to download torrents...
-                        </div>
-                    </div>
-                </div>
+            <div class="card">
+                <h3>📁 Available Torrents</h3>
+                <div id="torrents" class="torrent-list">No torrents available</div>
             </div>
         </div>
     </div>
 
-    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
-    <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+    <script>
+        let socket = null;
+        const peerId = 'VM-' + Math.random().toString(36).substr(2, 8);
+        let isRealSocketIO = false;
+
+        // Update button states
+        function updateButtonStates() {
+            const connected = socket && socket.connected;
+            document.getElementById('registerBtn').disabled = !connected;
+            document.getElementById('peersBtn').disabled = !connected;
+            document.getElementById('torrentsBtn').disabled = !connected;
+            document.getElementById('testBtn').disabled = !connected;
+            document.getElementById('uploadBtn').disabled = !connected;
+            
+            if (connected) {
+                document.getElementById('connectBtn').innerHTML = 'Reconnect';
+            } else {
+                document.getElementById('connectBtn').innerHTML = 'Connect to Tracker';
+            }
+        }
+
+        function updateSocketStatus(message, isGood) {
+            const status = document.getElementById('socket-status');
+            status.innerHTML = message;
+            status.className = `socket-status ${isGood ? 'socket-good' : 'socket-bad'}`;
+        }
+
+        function log(message, type = 'info') {
+            const logs = document.getElementById('logs');
+            const logEntry = document.createElement('div');
+            logEntry.className = `log ${type}`;
+            logEntry.innerHTML = `[${new Date().toLocaleTimeString()}] ${message}`;
+            logs.appendChild(logEntry);
+            console.log(`[${type.toUpperCase()}] ${message}`);
+            
+            // Auto-scroll to bottom
+            logs.scrollTop = logs.scrollHeight;
+        }
+
+        function clearLogs() {
+            const logs = document.getElementById('logs');
+            logs.innerHTML = '';
+            log('Logs cleared', 'info');
+        }
+
+        function debugConnection() {
+            log('=== DEBUG INFORMATION ===', 'warning');
+            log(`Socket exists: ${socket !== null}`, 'info');
+            log(`Socket connected: ${socket ? socket.connected : 'N/A'}`, 'info');
+            log(`Socket ID: ${socket ? socket.id : 'N/A'}`, 'info');
+            log(`Peer ID: ${peerId}`, 'info');
+            log(`Socket.IO available: ${typeof io !== 'undefined'}`, 'info');
+        }
+
+        function checkSocketIO() {
+            if (typeof io === 'undefined') {
+                updateSocketStatus('❌ Socket.IO NOT loaded - No real WebSocket', false);
+                isRealSocketIO = false;
+                return false;
+            } else {
+                updateSocketStatus('✅ REAL Socket.IO loaded - WebSocket ready!', true);
+                isRealSocketIO = true;
+                return true;
+            }
+        }
+
+        function connectToTracker() {
+            if (!checkSocketIO()) {
+                log('❌ Cannot connect: Real Socket.IO not available', 'error');
+                return;
+            }
+
+            // Close existing connection
+            if (socket) {
+                log('🔄 Closing existing connection...', 'info');
+                socket.removeAllListeners();
+                socket.disconnect();
+                socket = null;
+            }
+
+            updateButtonStates();
+            updateStatus('Connecting...', 'orange');
+
+            try {
+                log('📡 Establishing WebSocket connection to tracker...', 'info');
+
+                socket = io(window.location.origin, {
+                    transports: ['websocket'],
+                    reconnection: true,
+                    reconnectionAttempts: Infinity,
+                    reconnectionDelay: 1000,
+                    reconnectionDelayMax: 5000,
+                    timeout: 15000
+                });
+
+                socket.on('connect', function() {
+                    log('✅ WebSocket connection established successfully!', 'success');
+                    log(`📡 Connected with ID: ${socket.id}`, 'info');
+                    updateStatus('Connected to Tracker', 'green');
+                    updateSocketStatus('✅ CONNECTED - Ready for P2P operations', true);
+                    updateButtonStates();
+
+                    // Auto-register after connection
+                    setTimeout(() => {
+                        if (socket && socket.connected) {
+                            registerAsPeer();
+                        }
+                    }, 500);
+                });
+
+                socket.on('disconnect', function(reason) {
+                    log(`❌ Disconnected from tracker: ${reason}`, 'error');
+                    updateStatus('Disconnected', 'red');
+                    updateSocketStatus('❌ DISCONNECTED', false);
+                    updateButtonStates();
+                });
+
+                socket.on('server_message', function(data) {
+                    log(`📨 Server: ${data.message}`, data.type || 'info');
+                });
+
+                socket.on('peers_updated', function(data) {
+                    log(`📊 Peer list updated: ${data.count} peers connected`, 'success');
+                    document.getElementById('peerCount').textContent = data.count;
+                    displayPeers(data.peers);
+                });
+
+                socket.on('peer_registered', function(data) {
+                    log(`✅ Successfully registered as peer: ${data.peer_id}`, 'success');
+                });
+
+                socket.on('torrents_list', function(data) {
+                    log(`📁 Torrents list updated: ${data.count} torrents available`, 'success');
+                    document.getElementById('torrentCount').textContent = data.count;
+                    displayTorrents(data.torrents);
+                });
+
+                socket.on('connect_error', function(error) {
+                    log(`❌ Connection failed: ${error.message}`, 'error');
+                    updateStatus('Connection Failed', 'red');
+                    updateSocketStatus('❌ CONNECTION FAILED', false);
+                    updateButtonStates();
+                });
+
+            } catch (error) {
+                log(`❌ Connection failed: ${error.message}`, 'error');
+                updateStatus('Connection Failed', 'red');
+                updateButtonStates();
+            }
+        }
+
+        function updateStatus(text, color) {
+            const status = document.getElementById('status');
+            status.innerHTML = text;
+            status.className = color === 'green' ? 'connected' : 
+                              color === 'red' ? 'disconnected' : 
+                              'disconnected';
+            status.style.backgroundColor = color === 'orange' ? '#fff3cd' : '';
+            status.style.color = color === 'orange' ? '#856404' : '';
+            status.style.borderColor = color === 'orange' ? '#ffc107' : '';
+        }
+
+        function registerAsPeer() {
+            if (!socket || !socket.connected) {
+                log('❌ Not connected to tracker', 'error');
+                return;
+            }
+
+            const peerData = {
+                peer_id: peerId,
+                port: 6881,
+                client_type: 'vm-client',
+                capabilities: ['p2p-sharing', 'webseed']
+            };
+
+            log(`👤 Registering as peer: ${peerId}...`, 'info');
+            socket.emit('register_peer', peerData);
+        }
+
+        function getPeers() {
+            if (!socket || !socket.connected) {
+                log('❌ Not connected to tracker', 'error');
+                return;
+            }
+
+            log('🔍 Requesting peer list...', 'info');
+            socket.emit('get_peers');
+        }
+
+        function getTorrents() {
+            if (!socket || !socket.connected) {
+                log('❌ Not connected to tracker', 'error');
+                return;
+            }
+
+            log('📁 Requesting torrents list...', 'info');
+            socket.emit('get_torrents');
+        }
+
+        function testConnection() {
+            if (!socket || !socket.connected) {
+                log('❌ Not connected to tracker', 'error');
+                return;
+            }
+
+            log('🔧 Testing connection to tracker...', 'info');
+            socket.emit('test_connection', { test: true, timestamp: Date.now() });
+        }
+
+        function uploadTorrent() {
+            if (!socket || !socket.connected) {
+                log('❌ Not connected to tracker', 'error');
+                return;
+            }
+
+            const fileInput = document.getElementById('torrentFile');
+            const file = fileInput.files[0];
+            
+            if (!file) {
+                log('❌ Please select a torrent file first', 'error');
+                return;
+            }
+
+            if (!file.name.endsWith('.torrent')) {
+                log('❌ Please select a valid .torrent file', 'error');
+                return;
+            }
+
+            log(`📤 Uploading torrent file: ${file.name}...`, 'info');
+
+            const formData = new FormData();
+            formData.append('torrent', file);
+
+            fetch('/upload-torrent', {
+                method: 'POST',
+                body: formData
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    log(`✅ ${data.message}`, 'success');
+                    // Refresh torrents list
+                    getTorrents();
+                } else {
+                    log(`❌ Upload failed: ${data.error}`, 'error');
+                }
+            })
+            .catch(error => {
+                log(`❌ Upload error: ${error.message}`, 'error');
+            });
+
+            // Clear file input
+            fileInput.value = '';
+        }
+
+        function displayPeers(peers) {
+            const peersDiv = document.getElementById('peers');
+            
+            if (!peers || peers.length === 0) {
+                peersDiv.innerHTML = '<div style="text-align: center; color: #6c757d; padding: 20px;">No peers connected</div>';
+                return;
+            }
+
+            let html = '<ul>';
+            peers.forEach(peer => {
+                html += `
+                    <li>
+                        <strong>${peer.peer_id}</strong><br>
+                        <small>IP: ${peer.ip}:${peer.port}</small><br>
+                        <small>Connected: ${new Date(peer.connected_at).toLocaleTimeString()}</small>
+                    </li>
+                `;
+            });
+            html += '</ul>';
+            peersDiv.innerHTML = html;
+        }
+
+        function displayTorrents(torrents) {
+            const torrentsDiv = document.getElementById('torrents');
+            
+            if (!torrents || torrents.length === 0) {
+                torrentsDiv.innerHTML = '<div style="text-align: center; color: #6c757d; padding: 20px;">No torrents available</div>';
+                return;
+            }
+
+            let html = '<ul>';
+            torrents.forEach(torrent => {
+                html += `
+                    <li>
+                        <strong>${torrent.filename || 'Unknown File'}</strong><br>
+                        <small>Hash: ${torrent.info_hash || 'N/A'}</small><br>
+                        <small>Size: ${torrent.size ? (torrent.size / 1024).toFixed(2) + ' KB' : 'Unknown'}</small><br>
+                        <small>Uploaded: ${new Date(torrent.uploaded_at).toLocaleTimeString()}</small>
+                    </li>
+                `;
+            });
+            html += '</ul>';
+            torrentsDiv.innerHTML = html;
+        }
+
+        // Initialize on page load
+        window.addEventListener('load', function() {
+            log('🚀 P2P Client Started', 'info');
+            log(`Your Peer ID: ${peerId}`, 'info');
+            updateButtonStates();
+
+            // Auto-connect after short delay
+            setTimeout(function() {
+                if (checkSocketIO()) {
+                    log('✅ Real Socket.IO detected - ready for WebSocket connections', 'success');
+                    connectToTracker();
+                } else {
+                    log('❌ Socket.IO not available - limited functionality', 'error');
+                }
+            }, 500);
+        });
+    </script>
 </body>
 </html>

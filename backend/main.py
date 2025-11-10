@@ -1,310 +1,361 @@
-"""
-Main entry point for the Peer2Peer Torrent Client web application.
-"""
+# In your VM's main.py - WITH REAL SOCKET.IO
 import os
-import asyncio
-import hashlib
 from flask import Flask, render_template, jsonify, request, send_from_directory
-from flask_socketio import SocketIO
+from flask_socketio import SocketIO, emit
 from flask_cors import CORS
-from app.peer import PeerManager, BlockRequest
-from app.torrent import Torrent
-from app.tracker import Tracker
+import datetime
+import hashlib
+import bencodepy
+import time
+import logging
+import json
 
-def create_app():
-    """Create and configure the Flask application."""
-    app = Flask(__name__,
-              static_folder='web/static',
-              template_folder='web/templates')
+# Get the absolute path to the current directory
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+TEMPLATE_DIR = os.path.join(BASE_DIR, 'web', 'templates')
 
-    # Basic configuration
-    app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'dev-key-123')
-    app.config['UPLOAD_FOLDER'] = 'uploads'
+app = Flask(__name__, template_folder=TEMPLATE_DIR)
+app.config['SECRET_KEY'] = 'tracker-secret-key'
+CORS(app)
 
-    # Initialize extensions
-    CORS(app)
-    socketio = SocketIO(app, cors_allowed_origins="*")
+# Enable debug logging
+logging.basicConfig(level=logging.DEBUG)
+socketio = SocketIO(app,
+                   cors_allowed_origins="*",
+                   async_mode='threading',
+                   logger=True,
+                   engineio_logger=True,
+                   ping_timeout=30,
+                   ping_interval=20)
 
-    # Ensure upload folder exists
-    os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+# Store connected clients with their info
+connected_clients = {}
+torrents_metadata = {}
+torrent_swarms = {}
 
-    # Global peer manager
-    peer_manager = None
+# Simple persistence for torrents and swarms
+STATE_PATH = os.path.join(BASE_DIR, 'tracker_state.json')
 
-    @app.route('/')
-    def index():
-        """Serve the main application page."""
+def save_state():
+    try:
+        state = {
+            'torrents_metadata': torrents_metadata,
+            'torrent_swarms': torrent_swarms
+        }
+        with open(STATE_PATH, 'w') as f:
+            json.dump(state, f)
+    except Exception as e:
+        print(f"❌ Failed to save state: {e}")
+
+def load_state():
+    global torrents_metadata, torrent_swarms
+    try:
+        if os.path.exists(STATE_PATH):
+            with open(STATE_PATH, 'r') as f:
+                state = json.load(f)
+                torrents_metadata = state.get('torrents_metadata', {})
+                torrent_swarms = state.get('torrent_swarms', {})
+                print(f"✅ Loaded state: {len(torrents_metadata)} torrents, {len(torrent_swarms)} swarms")
+        else:
+            print("ℹ️ No existing state file; starting fresh")
+    except Exception as e:
+        print(f"❌ Failed to load state: {e}")
+
+# Load persisted state on startup
+load_state()
+
+# Serve the REAL Socket.IO client that we just downloaded
+@app.route('/socket.io.js')
+def serve_socket_io():
+    return send_from_directory(BASE_DIR, 'socket.io.min.js')
+
+# Basic Socket.IO events
+@socketio.on('connect')
+def handle_connect():
+    client_id = request.sid
+    client_ip = request.remote_addr
+
+    connected_clients[client_id] = {
+        'ip': client_ip,
+        'connected_at': datetime.datetime.now().isoformat(),
+        'type': 'unknown',
+        'peer_id': None,
+        'active_torrents': []
+    }
+
+    print(f"🎯 REAL WebSocket connection established: {client_id} from {client_ip}")
+
+    # Send immediate confirmation
+    emit('server_message', {
+        'type': 'success',
+        'message': f'REAL WebSocket connected from {client_ip}'
+    }, room=client_id)
+
+    # Send current peer list
+    emit('peers_updated', get_peer_list_data(), room=client_id)
+
+@socketio.on('disconnect')
+def handle_disconnect():
+    client_id = request.sid
+    if client_id in connected_clients:
+        disconnected_client = connected_clients.pop(client_id)
+        print(f"Client disconnected: {client_id} ({disconnected_client['ip']})")
+        # Remove peer from any swarms
+        peer_id = disconnected_client.get('peer_id')
+        if peer_id:
+            for info_hash, peers in list(torrent_swarms.items()):
+                if peer_id in peers:
+                    peers.remove(peer_id)
+                    if not peers:
+                        torrent_swarms.pop(info_hash, None)
+            save_state()
+        broadcast_peer_list()
+
+@socketio.on('register_peer')
+def handle_register_peer(data):
+    client_id = request.sid
+    if client_id in connected_clients:
+        peer_id = data.get('peer_id', 'unknown')
+
+        connected_clients[client_id].update({
+            'type': 'peer',
+            'peer_id': peer_id,
+            'port': data.get('port', 6881),
+            'client_type': data.get('client_type', 'unknown'),
+            'ip_address': data.get('ip_address', request.remote_addr),
+            'capabilities': data.get('capabilities', [])
+        })
+
+        print(f"✅ Peer registered: {peer_id}")
+
+        broadcast_peer_list()
+
+        emit('server_message', {
+            'type': 'success',
+            'message': f'Successfully registered as peer: {peer_id}'
+        }, room=client_id)
+
+        # Send registration confirmation
+        emit('peer_registered', {
+            'peer_id': peer_id,
+            'status': 'success',
+            'timestamp': datetime.datetime.now().isoformat()
+        }, room=client_id)
+    else:
+        print(f"❌ Client {client_id} not found in connected_clients")
+
+@socketio.on('get_peers')
+def handle_get_peers():
+    client_id = request.sid
+    print(f"📊 Client {client_id} requested peer list")
+    peer_data = get_peer_list_data()
+    print(f"📊 Sending peer data: {peer_data}")
+    emit('peers_updated', peer_data, room=client_id)
+
+@socketio.on('get_torrents')
+def handle_get_torrents():
+    client_id = request.sid
+    print(f"📁 Client {client_id} requested torrents list")
+    emit('torrents_list', {
+        'torrents': list(torrents_metadata.values()),
+        'count': len(torrents_metadata)
+    }, room=client_id)
+
+@socketio.on('test_connection')
+def handle_test_connection(data):
+    client_id = request.sid
+    print(f"🔧 Client {client_id} testing connection")
+    emit('server_message', {
+        'type': 'success',
+        'message': f'WebSocket test successful - Client: {client_id}'
+    }, room=client_id)
+
+# REAL P2P: Torrent announcement
+@socketio.on('announce_torrent')
+def handle_announce_torrent(data):
+    client_id = request.sid
+    info_hash = data.get('info_hash')
+    peer_id = data.get('peer_id')
+
+    if not all([info_hash, peer_id]):
+        return
+
+    print(f"🎯 Peer {peer_id} announced torrent {info_hash[:8]}...")
+
+    # Initialize swarm if needed
+    if info_hash not in torrent_swarms:
+        torrent_swarms[info_hash] = []
+
+    # Add peer to swarm
+    if peer_id not in torrent_swarms[info_hash]:
+        torrent_swarms[info_hash].append(peer_id)
+        save_state()
+
+    # Send peer list for this torrent
+    other_peers = [p for p in torrent_swarms[info_hash] if p != peer_id]
+
+    emit('torrent_peers', {
+        'info_hash': info_hash,
+        'peers': other_peers,
+        'swarm_size': len(torrent_swarms[info_hash])
+    }, room=client_id)
+
+@socketio.on('message')
+def handle_message(data):
+    print(f"📨 Received message: {data}")
+    emit('server_message', {
+        'type': 'info',
+        'message': f'Message received: {data}'
+    }, room=request.sid)
+
+def get_peer_list_data():
+    peers = []
+    for client_id, client_info in connected_clients.items():
+        if client_info.get('type') == 'peer':
+            peer_info = {
+                'client_id': client_id,
+                'ip': client_info['ip'],
+                'port': client_info.get('port', 6881),
+                'peer_id': client_info.get('peer_id'),
+                'connected_at': client_info.get('connected_at'),
+                'active_torrents': client_info.get('active_torrents', [])
+            }
+            peers.append(peer_info)
+
+    return {
+        'peers': peers,
+        'count': len(peers),
+        'total_clients': len(connected_clients),
+        'timestamp': datetime.datetime.now().isoformat()
+    }
+
+def broadcast_peer_list():
+    peer_data = get_peer_list_data()
+    print(f"📢 Broadcasting peer list to all clients: {peer_data}")
+    socketio.emit('peers_updated', peer_data)
+
+@app.route('/')
+def index():
+    try:
         return render_template('index.html')
+    except Exception as e:
+        return f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>P2P Tracker</title>
+            <script src="/socket.io.js"></script>
+        </head>
+        <body>
+            <h1>P2P Tracker Server</h1>
+            <p>✅ Real Socket.IO client loaded</p>
+            <p>Access: <a href="http://localhost:5001">http://localhost:5001</a></p>
+            <p>Error: {str(e)}</p>
+        </body>
+        </html>
+        """
 
-    @app.route('/api/peers', methods=['GET'])
-    def get_peers():
-        """Get list of connected peers."""
-        if peer_manager:
-            peers = [f"{ip}:{port}" for ip, port in peer_manager.peers.keys()]
-            return jsonify({"peers": peers})
-        return jsonify({"peers": []})
+@app.route('/upload-torrent', methods=['POST'])
+def upload_torrent():
+    try:
+        if 'torrent' not in request.files:
+            return jsonify({'success': False, 'error': 'No file uploaded'})
 
-    @app.route('/api/peers/connect', methods=['POST'])
-    async def connect_peers():
-        """Connect to peers from a torrent file."""
-        global peer_manager
+        torrent_file = request.files['torrent']
+        filename = torrent_file.filename
+
+        if not filename:
+            return jsonify({'success': False, 'error': 'No file selected'})
+
+        # Store file info
+        file_id = hashlib.md5(filename.encode()).hexdigest()[:8]
+        torrents_metadata[file_id] = {
+            'filename': filename,
+            'uploaded_at': datetime.datetime.now().isoformat(),
+            'size': len(torrent_file.read()),
+            'info_hash': file_id
+        }
+        save_state()
         
-        try:
-            data = request.get_json()
-            torrent_path = data.get('torrent_path')
-            
-            if not torrent_path or not os.path.exists(torrent_path):
-                return jsonify({"error": "Invalid torrent path"}), 400
+        # Reset file pointer
+        torrent_file.seek(0)
 
-            # Load torrent file
-            torrent = Torrent(torrent_path)
-            
-            # Create tracker and get peers
-            tracker = Tracker(torrent)
-            peers = tracker.announce()
-            
-            # Create peer manager
-            peer_id = b"-PC0001-" + os.urandom(12)  # Generate random peer ID
-            peer_manager = PeerManager(torrent.info_hash, peer_id)
-            
-            # Connect to peers
-            connected_peers = []
-            for peer in peers:
-                peer_conn = await peer_manager.add_peer(peer.ip, peer.port)
-                if peer_conn:
-                    connected_peers.append(f"{peer.ip}:{peer.port}")
-            
-            return jsonify({
-                "status": "success",
-                "connected_peers": connected_peers
-            })
-            
-        except Exception as e:
-            return jsonify({"error": str(e)}), 500
+        success_message = f"Torrent uploaded successfully: {filename} (ID: {file_id})"
+        print(success_message)
 
-    @app.route('/api/download/start', methods=['POST'])
-    async def start_download():
-        """Start downloading a piece from peers."""
-        try:
-            data = request.get_json()
-            piece_index = data.get('piece_index', 0)
-            
-            if not peer_manager:
-                return jsonify({"error": "No peers connected"}), 400
+        # Broadcast to all clients
+        socketio.emit('server_message', {
+            'type': 'success',
+            'message': success_message
+        })
+        
+        # Broadcast updated torrents list
+        socketio.emit('torrents_list', {
+            'torrents': list(torrents_metadata.values()),
+            'count': len(torrents_metadata)
+        })
 
-            # Get a peer that has the piece
-            peer = await peer_manager.get_peer_for_piece(piece_index)
-            if not peer:
-                return jsonify({"error": "No peer has the requested piece"}), 404
+        return jsonify({
+            'success': True,
+            'message': success_message,
+            'filename': filename,
+            'file_id': file_id
+        })
 
-            # Request the first block of the piece
-            block = BlockRequest(piece_index=piece_index, offset=0)
-            data = await peer.request_piece(piece_index, block)
-            
-            if data:
-                return jsonify({
-                    "status": "success",
-                    "piece": piece_index,
-                    "data_size": len(data)
-                })
-            else:
-                return jsonify({"error": "Failed to download piece"}), 500
-                
-        except Exception as e:
-            return jsonify({"error": str(e)}), 500
+    except Exception as e:
+        error_msg = f"Upload error: {str(e)}"
+        print(f"❌ {error_msg}")
+        return jsonify({'success': False, 'error': error_msg})
 
-    @app.route('/static/<path:path>')
-    def serve_static(path):
-        """Serve static files."""
-        return send_from_directory('web/static', path)
+@app.route('/api/status')
+def api_status():
+    return jsonify({
+        "status": "tracker_running",
+        "total_connected_clients": len(connected_clients),
+        "total_peers": len([c for c in connected_clients.values() if c.get('type') == 'peer']),
+        "total_torrents": len(torrents_metadata),
+        "connected_peers": [c.get('peer_id') for c in connected_clients.values() if c.get('type') == 'peer'],
+        "server_time": datetime.datetime.now().isoformat()
+    })
 
-    return app, socketio
+@app.route('/api/peers')
+def api_peers():
+    return jsonify(get_peer_list_data())
+
+@app.route('/api/torrents')
+def api_torrents():
+    return jsonify({
+        'torrents': list(torrents_metadata.values()),
+        'count': len(torrents_metadata)
+    })
+
+# Health check endpoint
+@app.route('/health')
+def health():
+    return jsonify({
+        "status": "healthy",
+        "timestamp": datetime.datetime.now().isoformat()
+    })
 
 if __name__ == '__main__':
-    # Create the web/static and web/templates directories if they don't exist
-    os.makedirs('web/static/js', exist_ok=True)
-    os.makedirs('web/templates', exist_ok=True)
-    os.makedirs('uploads', exist_ok=True)
+    os.makedirs(TEMPLATE_DIR, exist_ok=True)
 
-    # Create a basic index.html if it doesn't exist
-    index_path = os.path.join('web', 'templates', 'index.html')
-    if not os.path.exists(index_path):
-        with open(index_path, 'w', encoding='utf-8') as f:
-            f.write('''<!DOCTYPE html>
-<html>
-<head>
-    <title>Peer2Peer Torrent Client</title>
-    <style>
-        body {
-            font-family: Arial, sans-serif;
-            max-width: 1000px;
-            margin: 0 auto;
-            padding: 20px;
-            background-color: #f5f5f5;
-        }
-        .container {
-            background: white;
-            padding: 20px;
-            border-radius: 8px;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-        }
-        h1 {
-            color: #333;
-            text-align: center;
-        }
-        .status {
-            margin: 20px 0;
-            padding: 10px;
-            background: #e9ecef;
-            border-radius: 4px;
-        }
-        .peers {
-            margin: 20px 0;
-        }
-        .peer {
-            padding: 8px;
-            margin: 4px 0;
-            background: #f8f9fa;
-            border-radius: 4px;
-            display: flex;
-            justify-content: space-between;
-        }
-        button {
-            background: #007bff;
-            color: white;
-            border: none;
-            padding: 8px 16px;
-            border-radius: 4px;
-            cursor: pointer;
-        }
-        button:disabled {
-            background: #6c757d;
-            cursor: not-allowed;
-        }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <h1>Peer2Peer Torrent Client</h1>
-        
-        <div class="upload-section">
-            <h2>Upload Torrent</h2>
-            <input type="file" id="torrent-file" accept=".torrent">
-            <button id="upload-btn">Start Download</button>
-        </div>
-        
-        <div class="status" id="status">
-            Ready to download torrents...
-        </div>
-        
-        <div class="peers">
-            <h2>Connected Peers</h2>
-            <div id="peers-list">
-                <p>No peers connected yet</p>
-            </div>
-            <button id="connect-btn">Connect to Peers</button>
-        </div>
-    </div>
-    
-    <script src="{{ url_for('static', filename='js/app.js') }}"></script>
-</body>
-</html>''')
+    # Verify Socket.IO client exists
+    socket_io_path = os.path.join(BASE_DIR, 'socket.io.min.js')
+    if os.path.exists(socket_io_path):
+        print("✅ Real Socket.IO client found and ready!")
+    else:
+        print("❌ Socket.IO client missing - using Flask-SocketIO built-in")
 
-    # Create a basic app.js if it doesn't exist
-    js_dir = os.path.join('web', 'static', 'js')
-    os.makedirs(js_dir, exist_ok=True)
-    js_path = os.path.join(js_dir, 'app.js')
-    if not os.path.exists(js_path):
-        with open(js_path, 'w', encoding='utf-8') as f:
-            f.write('''// Main application JavaScript
-document.addEventListener('DOMContentLoaded', () => {
-    const uploadBtn = document.getElementById('upload-btn');
-    const connectBtn = document.getElementById('connect-btn');
-    const torrentFile = document.getElementById('torrent-file');
-    const statusDiv = document.getElementById('status');
-    const peersList = document.getElementById('peers-list');
+    print(f"🚀 Starting P2P Tracker on http://0.0.0.0:5001")
+    print("📍 Access via: http://localhost:5001")
+    print("🔧 Real Socket.IO client enabled")
+    print("📊 Debug logging enabled")
+    print("=" * 50)
 
-    // Handle file upload
-    uploadBtn.addEventListener('click', async () => {
-        const file = torrentFile.files[0];
-        if (!file) {
-            statusDiv.textContent = 'Please select a .torrent file';
-            return;
-        }
-
-        const formData = new FormData();
-        formData.append('file', file);
-
-        try {
-            statusDiv.textContent = 'Uploading torrent file...';
-            const response = await fetch('/api/torrents', {
-                method: 'POST',
-                body: formData,
-            });
-
-            const result = await response.json();
-            if (response.ok) {
-                statusDiv.textContent = `Download started: ${result.filename}`;
-                // Enable the connect button after successful upload
-                connectBtn.disabled = false;
-            } else {
-                statusDiv.textContent = `Error: ${result.error}`;
-            }
-        } catch (error) {
-            statusDiv.textContent = `Error: ${error.message}`;
-        }
-    });
-
-    // Handle peer connection
-    connectBtn.addEventListener('click', async () => {
-        try {
-            statusDiv.textContent = "Connecting to peers...";
-            const response = await fetch('/api/peers/connect', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({
-                    torrent_path: 'path/to/your.torrent'  // Update this path
-                })
-            });
-            
-            const result = await response.json();
-            
-            if (result.error) {
-                statusDiv.textContent = `Error: ${result.error}`;
-            } else {
-                statusDiv.textContent = `Connected to ${result.connected_peers.length} peers`;
-                updatePeerList(result.connected_peers);
-            }
-        } catch (error) {
-            statusDiv.textContent = `Error connecting to peers: ${error.message}`;
-        }
-    });
-
-    // Update the peer list in the UI
-    function updatePeerList(peers) {
-        peersList.innerHTML = peers.length > 0 
-            ? peers.map(peer => `<div class="peer">${peer}</div>`).join('')
-            : '<p>No peers connected</p>';
-    }
-
-    // Initial fetch of peers
-    async function fetchPeers() {
-        try {
-            const response = await fetch('/api/peers');
-            const data = await response.json();
-            updatePeerList(data.peers || []);
-        } catch (error) {
-            console.error('Error fetching peers:', error);
-        }
-    }
-
-    // Initial fetch
-    fetchPeers();
-});
-''')
-
-    # Create the application and run it
-    app, socketio = create_app()
-    socketio.run(app, debug=True, host='0.0.0.0', port=5000)
+    socketio.run(app, 
+                 host='0.0.0.0', 
+                 port=5001, 
+                 debug=True, 
+                 allow_unsafe_werkzeug=True,
+                 use_reloader=False)  # Disable reloader to prevent double connections
